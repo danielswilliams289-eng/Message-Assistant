@@ -1,0 +1,22 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/api/scout",
+      "destination": "/api/scout"
+    },
+    {
+      "source": "/api/gmail/send",
+      "destination": "/api/gmail/send"
+    },
+    {
+      "source": "/api/validate-email",
+      "destination": "/api/validate-email"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

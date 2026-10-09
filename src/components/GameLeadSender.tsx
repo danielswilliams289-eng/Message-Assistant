@@ -24,6 +24,7 @@ import {
   Square,
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
+import { extractGamesClientSide, safeOpenExternalUrl } from '../lib/steamIntelligence';
 
 export interface DiscoveredGameLead {
   id: string;
@@ -231,6 +232,8 @@ export function GameLeadSender() {
     setErrorMessage(null);
     setSendSummary(null);
 
+    let rawLeads: any[] = [];
+
     try {
       const response = await fetch('/api/scout', {
         method: 'POST',
@@ -242,12 +245,21 @@ export function GameLeadSender() {
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to analyze games');
+      if (response.ok) {
+        const data = await response.json();
+        rawLeads = data.leads || [];
+      } else {
+        // Vercel serverless / static fallback
+        console.warn('API scout route returned non-OK, using client intelligence fallback');
+        rawLeads = extractGamesClientSide(sources);
       }
+    } catch (fetchErr) {
+      // Network error or 404 (e.g., pure static Vercel deployment)
+      console.warn('Network fetch error, extracting via client intelligence fallback:', fetchErr);
+      rawLeads = extractGamesClientSide(sources);
+    }
 
-      const rawLeads: any[] = data.leads || [];
+    try {
       if (rawLeads.length === 0) {
         setErrorMessage('No games could be extracted from the text. Try pasting a clear list of titles or Steam search results.');
         return;
@@ -368,13 +380,13 @@ export function GameLeadSender() {
     }
   };
 
-  // Open single game in Gmail web compose
+  // Open single game in Gmail web compose (bypasses browser pop-up blocker)
   const handleOpenSingleInGmail = (item: DiscoveredGameLead) => {
     if (!item.email) return;
     const subj = encodeURIComponent(renderTemplate(subjectTemplate, item));
     const body = encodeURIComponent(renderTemplate(bodyTemplate, item));
     const url = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(item.email)}&su=${subj}&body=${body}`;
-    window.open(url, '_blank');
+    safeOpenExternalUrl(url);
   };
 
   // Open selected games in Gmail web compose (BCC)
@@ -388,11 +400,11 @@ export function GameLeadSender() {
 
     if (emails.length === 1) {
       const url = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emails[0])}&su=${subj}&body=${body}`;
-      window.open(url, '_blank');
+      safeOpenExternalUrl(url);
     } else {
       const bcc = encodeURIComponent(emails.join(','));
       const url = `https://mail.google.com/mail/?view=cm&fs=1&bcc=${bcc}&su=${subj}&body=${body}`;
-      window.open(url, '_blank');
+      safeOpenExternalUrl(url);
     }
   };
 
@@ -429,7 +441,14 @@ export function GameLeadSender() {
       try {
         await login();
       } catch (err: any) {
-        setErrorMessage('Please connect your Google account to send emails directly via Gmail.');
+        if (err?.code === 'auth/unauthorized-domain' || err?.code === 'auth/popup-blocked') {
+          // Handled by global Vercel / Auth dialog
+          return;
+        }
+        setErrorMessage(
+          err?.friendlyMessage ||
+          'Google authentication was cancelled or blocked by browser. You can still reach out immediately using "Open in Gmail (Web)" or "Copy All Emails" without logging in!'
+        );
         return;
       }
     }
@@ -805,6 +824,16 @@ export function GameLeadSender() {
                           <Inbox className="w-3.5 h-3.5 text-red-500" />
                           <span>Gmail</span>
                         </button>
+
+                        {/* Open in Default Email Client (Bypasses all popups) */}
+                        <a
+                          href={`mailto:${encodeURIComponent(item.email)}?subject=${encodeURIComponent(renderTemplate(subjectTemplate, item))}&body=${encodeURIComponent(renderTemplate(bodyTemplate, item))}`}
+                          className="px-2 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-slate-900 text-xs font-medium transition-colors flex items-center gap-1 shadow-2xs"
+                          title="Open in default email app (bypasses browser popups)"
+                        >
+                          <Mail className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Mail</span>
+                        </a>
                       </div>
                     ) : (
                       <span className="text-xs text-slate-400 italic">No email available</span>

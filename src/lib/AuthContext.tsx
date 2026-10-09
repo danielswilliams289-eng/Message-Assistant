@@ -14,8 +14,14 @@ import {
   addDoc,
   writeBatch,
 } from 'firebase/firestore';
-import { auth, db, initAuth, signInWithGoogle, logOut, getCachedAccessToken, requestGmailTokenViaGIS, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, initAuth, signInWithGoogle, signInWithGoogleRedirect, logOut, getCachedAccessToken, requestGmailTokenViaGIS, handleFirestoreError, OperationType } from './firebase';
 import { Lead, Campaign, ActivityLog, UserProfile, CampaignRecipient, OutreachStatus } from '../types';
+
+export interface AuthErrorInfo {
+  code: string;
+  message: string;
+  hostname: string;
+}
 
 const LEADS_STORAGE_PREFIX = 'scout_leads_';
 const CAMPAIGNS_STORAGE_PREFIX = 'scout_campaigns_';
@@ -44,7 +50,10 @@ interface AuthContextType {
   leads: Lead[];
   campaigns: Campaign[];
   activities: ActivityLog[];
-  login: () => Promise<void>;
+  authError: AuthErrorInfo | null;
+  login: (method?: 'popup' | 'redirect') => Promise<void>;
+  loginWithRedirect: () => Promise<void>;
+  clearAuthError: () => void;
   logout: () => Promise<void>;
   updateProfile: (data: Partial<UserProfile>) => Promise<void>;
   addLead: (lead: Omit<Lead, 'id' | 'userId' | 'createdAt'>) => Promise<string>;
@@ -69,6 +78,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [leads, setLeads] = useState<Lead[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
+  const [authError, setAuthError] = useState<AuthErrorInfo | null>(null);
 
   useEffect(() => {
     const unsubscribeAuth = initAuth(
@@ -213,8 +223,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [user]);
 
-  const login = async () => {
+  const clearAuthError = () => {
+    setAuthError(null);
+  };
+
+  const login = async (method: 'popup' | 'redirect' = 'popup') => {
     try {
+      setAuthError(null);
+      if (method === 'redirect') {
+        await signInWithGoogleRedirect();
+        return;
+      }
+
       const result = await signInWithGoogle();
       if (result) {
         setUser(result.user);
@@ -232,16 +252,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           handleFirestoreError(e, OperationType.CREATE, 'activity_logs');
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Login action error:', err);
+      const message = err?.friendlyMessage || err?.message || 'Authentication error';
+      setAuthError({
+        code: err?.code || 'auth/unknown',
+        message,
+        hostname: typeof window !== 'undefined' ? window.location.hostname : '',
+      });
       throw err;
     }
+  };
+
+  const loginWithRedirect = async () => {
+    return login('redirect');
   };
 
   const logout = async () => {
     await logOut();
     setUser(null);
     setAccessToken(null);
+    setAuthError(null);
   };
 
   const updateProfile = async (data: Partial<UserProfile>) => {
@@ -618,7 +649,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         leads,
         campaigns,
         activities,
+        authError,
         login,
+        loginWithRedirect,
+        clearAuthError,
         logout,
         updateProfile,
         addLead,

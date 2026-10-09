@@ -3,6 +3,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut,
   onAuthStateChanged,
   User,
@@ -127,6 +129,29 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string | null) => void,
   onAuthFailure?: () => void
 ) => {
+  // Check for redirect result on app initialization (useful if popups are blocked on Vercel)
+  if (typeof window !== 'undefined') {
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (result && result.user) {
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          let token = credential?.accessToken || null;
+          if (!token) {
+            token = await requestGmailTokenViaGIS(result.user.email || undefined);
+          }
+          if (token) {
+            cachedAccessToken = token;
+          }
+          if (onAuthSuccess) {
+            onAuthSuccess(result.user, cachedAccessToken);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Redirect auth check notice:', err);
+      });
+  }
+
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       if (onAuthSuccess) {
@@ -174,6 +199,17 @@ export const requestGmailTokenViaGIS = async (hintEmail?: string): Promise<strin
   });
 };
 
+// Sign in with Google via Redirect (Guaranteed to bypass all browser pop-up blockers)
+export const signInWithGoogleRedirect = async (): Promise<void> => {
+  try {
+    await signInWithRedirect(auth, provider);
+  } catch (error: any) {
+    console.error('Google Sign-in Redirect Error:', error);
+    throw error;
+  }
+};
+
+// Sign in with Google via Popup with automatic error diagnostics
 export const signInWithGoogle = async (): Promise<{ user: User; accessToken: string } | null> => {
   try {
     isSigningIn = true;
@@ -195,6 +231,14 @@ export const signInWithGoogle = async (): Promise<{ user: User; accessToken: str
     return { user: result.user, accessToken: cachedAccessToken || '' };
   } catch (error: any) {
     console.error('Google Sign In Error:', error);
+
+    // Provide friendly domain diagnostic if deployed to Vercel without domain whitelisting
+    if (error?.code === 'auth/unauthorized-domain' && typeof window !== 'undefined') {
+      error.friendlyMessage = `Your current domain (${window.location.hostname}) is not yet authorized in Firebase Console. Add '${window.location.hostname}' to Firebase Authentication > Settings > Authorized Domains. Alternatively, use 'Open in Gmail (Web)' or 'Copy All Emails' without signing in!`;
+    } else if (error?.code === 'auth/popup-blocked') {
+      error.friendlyMessage = 'Your browser blocked the sign-in pop-up window. You can use "Sign in via Redirect" or use "Open in Gmail (Web)" directly without signing in.';
+    }
+
     throw error;
   } finally {
     isSigningIn = false;

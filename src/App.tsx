@@ -7,6 +7,7 @@ import { CampaignDetailView } from './components/CampaignDetailView';
 import { GmailConnectionView } from './components/GmailConnectionView';
 import { LeadDetailModal } from './components/LeadDetailModal';
 import { CreateCampaignModal } from './components/CreateCampaignModal';
+import { VercelPopupHelperModal } from './components/VercelPopupHelperModal';
 import { Lead } from './types';
 import {
   Gamepad2,
@@ -19,16 +20,18 @@ import {
   Sparkles,
   LogOut,
   Inbox,
+  HelpCircle,
 } from 'lucide-react';
 
 export type AppViewMode = 'scout_and_send' | 'saved_leads' | 'campaigns' | 'gmail_settings';
 
 export default function App() {
-  const { user, loading, login, logout, campaigns, accessToken, reauthorizeGmail, leads } = useAuth();
+  const { user, loading, login, loginWithRedirect, logout, campaigns, accessToken, reauthorizeGmail, leads, authError, clearAuthError } = useAuth();
   const [currentView, setCurrentView] = useState<AppViewMode>('scout_and_send');
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [selectedLeadDetail, setSelectedLeadDetail] = useState<Lead | null>(null);
   const [isCreateCampaignOpen, setIsCreateCampaignOpen] = useState(false);
+  const [isHelperOpen, setIsHelperOpen] = useState(false);
   const [reauthorizing, setReauthorizing] = useState(false);
   const [loginLoading, setLoginLoading] = useState(false);
 
@@ -202,6 +205,15 @@ export default function App() {
               <span>Connect Gmail</span>
             </button>
           )}
+
+          {/* Vercel & Pop-up Setup Guide trigger */}
+          <button
+            onClick={() => setIsHelperOpen(true)}
+            title="Vercel & Pop-up Configuration Guide"
+            className="p-2 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            <HelpCircle className="w-4 h-4 text-slate-500" />
+          </button>
         </div>
       </header>
 
@@ -303,6 +315,22 @@ export default function App() {
             setSelectedCampaignId(newId);
             setCurrentView('campaigns');
             setIsCreateCampaignOpen(false);
+          }}
+        />
+      )}
+
+      {/* Vercel & Pop-up Assistant Modal */}
+      {(authError || isHelperOpen) && (
+        <VercelPopupHelperModal
+          error={authError}
+          onClose={() => {
+            clearAuthError();
+            setIsHelperOpen(false);
+          }}
+          onRetryWithRedirect={async () => {
+            clearAuthError();
+            setIsHelperOpen(false);
+            await loginWithRedirect();
           }}
         />
       )}
