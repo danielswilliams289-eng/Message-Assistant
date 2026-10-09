@@ -1,0 +1,126 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and settings",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "defaultSenderName": { "type": "string" },
+        "defaultSignature": { "type": "string" },
+        "defaultNiche": { "type": "string" },
+        "sendingPaceSeconds": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Scouted business prospect lead",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "company": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "website": { "type": "string" },
+        "niche": { "type": "string" },
+        "sourceUrl": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "emailStatus": { "type": "string", "enum": ["valid", "invalid", "unknown"] },
+        "outreachStatus": { "type": "string", "enum": ["not_contacted", "queued", "sending", "sent", "failed", "skipped"] },
+        "inSendList": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "lastContactedAt": { "type": "string" },
+        "lastContactedCampaign": { "type": "string" }
+      },
+      "required": ["userId", "emailStatus", "outreachStatus", "createdAt"]
+    },
+    "Campaign": {
+      "title": "Campaign",
+      "description": "Email outreach campaign",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "niche": { "type": "string" },
+        "subject": { "type": "string" },
+        "body": { "type": "string" },
+        "senderEmail": { "type": "string" },
+        "senderName": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "running", "paused", "completed", "cancelled"] },
+        "totalRecipients": { "type": "number" },
+        "sentCount": { "type": "number" },
+        "pendingCount": { "type": "number" },
+        "failedCount": { "type": "number" },
+        "paceSeconds": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "startedAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["userId", "name", "subject", "body", "status", "createdAt"]
+    },
+    "CampaignRecipient": {
+      "title": "CampaignRecipient",
+      "description": "Target recipient in a campaign",
+      "type": "object",
+      "properties": {
+        "campaignId": { "type": "string" },
+        "userId": { "type": "string" },
+        "leadId": { "type": "string" },
+        "recipientEmail": { "type": "string" },
+        "recipientName": { "type": "string" },
+        "recipientCompany": { "type": "string" },
+        "status": { "type": "string", "enum": ["queued", "sending", "sent", "failed", "skipped"] },
+        "personalizedSubject": { "type": "string" },
+        "personalizedBody": { "type": "string" },
+        "gmailMessageId": { "type": "string" },
+        "sentAt": { "type": "string" },
+        "errorMessage": { "type": "string" }
+      },
+      "required": ["campaignId", "userId", "leadId", "status"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "User activity log entry",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId", "type", "description", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents keyed by Auth UID"
+    },
+    "/leads/{leadId}": {
+      "schema": "Lead",
+      "description": "Prospect leads owned by userId"
+    },
+    "/campaigns/{campaignId}": {
+      "schema": "Campaign",
+      "description": "Outreach campaigns owned by userId"
+    },
+    "/campaign_recipients/{recipientId}": {
+      "schema": "CampaignRecipient",
+      "description": "Campaign recipient tracking records owned by userId"
+    },
+    "/activity_logs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Activity timeline logs owned by userId"
+    }
+  }
+}

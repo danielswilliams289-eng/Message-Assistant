@@ -1,0 +1,6 @@
+{
+  "name": "Scout - Lead Scouting & Outreach",
+  "description": "Collect legitimate business prospects from user-supplied sources, organize leads, and send personalized outreach campaigns via connected Gmail.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

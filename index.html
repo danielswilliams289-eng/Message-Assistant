@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scout - Lead Scouting & Outreach</title>
+    <meta name="description" content="Collect legitimate business prospects from user-supplied sources, organize leads, and send personalized outreach campaigns via connected Gmail." />
+    <meta property="og:title" content="Scout - Lead Scouting & Outreach" />
+    <meta property="og:description" content="Collect legitimate business prospects from user-supplied sources, organize leads, and send personalized outreach campaigns via connected Gmail." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+      (function() {
+        try {
+          var originalFetch = typeof window !== 'undefined' ? window.fetch : null;
+          if (originalFetch) {
+            var currentFetch = originalFetch;
+            try {
+              Object.defineProperty(window, 'fetch', {
+                get: function() {
+                  return currentFetch;
+                },
+                set: function(fn) {
+                  currentFetch = fn;
+                },
+                configurable: true,
+                enumerable: true
+              });
+            } catch (e1) {
+              if (typeof Window !== 'undefined' && Window.prototype) {
+                try {
+                  Object.defineProperty(Window.prototype, 'fetch', {
+                    get: function() {
+                      return currentFetch;
+                    },
+                    set: function(fn) {
+                      currentFetch = fn;
+                    },
+                    configurable: true,
+                    enumerable: true
+                  });
+                } catch (e2) {}
+              }
+            }
+          }
+          window.addEventListener('error', function(e) {
+            if (e && e.message && e.message.indexOf('Cannot set property fetch') !== -1) {
+              e.preventDefault && e.preventDefault();
+              e.stopImmediatePropagation && e.stopImmediatePropagation();
+              return true;
+            }
+          }, true);
+        } catch (err) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
