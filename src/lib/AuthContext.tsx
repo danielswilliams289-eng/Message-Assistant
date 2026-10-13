@@ -1,21 +1,14 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { User } from 'firebase/auth';
-import {
-  collection,
-  query,
-  where,
-  onSnapshot,
-  orderBy,
-  doc,
-  setDoc,
-  getDoc,
-  deleteDoc,
-  updateDoc,
-  addDoc,
-  writeBatch,
-} from 'firebase/firestore';
-import { auth, db, initAuth, signInWithGoogle, signInWithGoogleRedirect, logOut, getCachedAccessToken, requestGmailTokenViaGIS, handleFirestoreError, OperationType } from './firebase';
 import { Lead, Campaign, ActivityLog, UserProfile, CampaignRecipient, OutreachStatus } from '../types';
+import {
+  GoogleUserProfile,
+  getCachedAccessToken,
+  setCachedAccessToken,
+  requestGoogleOAuthToken,
+  getGoogleClientId,
+  setGoogleClientId,
+  fetchGoogleUserProfile,
+} from './googleAuth';
 
 export interface AuthErrorInfo {
   code: string;
@@ -23,9 +16,12 @@ export interface AuthErrorInfo {
   hostname: string;
 }
 
+const STORAGE_ACTIVE_USER = 'scout_active_user';
 const LEADS_STORAGE_PREFIX = 'scout_leads_';
 const CAMPAIGNS_STORAGE_PREFIX = 'scout_campaigns_';
+const RECIPIENTS_STORAGE_PREFIX = 'scout_recipients_';
 const PROFILE_STORAGE_PREFIX = 'scout_profile_';
+const ACTIVITY_STORAGE_PREFIX = 'scout_activity_';
 
 function getStored<T>(key: string): T[] {
   try {
@@ -43,7 +39,7 @@ function setStored<T>(key: string, data: T): void {
 }
 
 interface AuthContextType {
-  user: User | null;
+  user: GoogleUserProfile | null;
   loading: boolean;
   accessToken: string | null;
   profile: UserProfile | null;
@@ -51,8 +47,11 @@ interface AuthContextType {
   campaigns: Campaign[];
   activities: ActivityLog[];
   authError: AuthErrorInfo | null;
+  googleClientId: string;
+  updateGoogleClientId: (clientId: string) => void;
   login: (method?: 'popup' | 'redirect') => Promise<void>;
   loginWithRedirect: () => Promise<void>;
+  loginAsGuest: () => Promise<void>;
   clearAuthError: () => void;
   logout: () => Promise<void>;
   updateProfile: (data: Partial<UserProfile>) => Promise<void>;
@@ -64,14 +63,20 @@ interface AuthContextType {
   bulkRemoveFromSendList: (leadIds: string[]) => Promise<void>;
   createCampaign: (data: Omit<Campaign, 'id' | 'userId' | 'createdAt'>, recipientLeads: Lead[]) => Promise<string>;
   updateCampaignStatus: (id: string, status: Campaign['status']) => Promise<void>;
+  updateCampaign: (id: string, updates: Partial<Campaign>) => Promise<void>;
+  getCampaignRecipients: (campaignId: string) => CampaignRecipient[];
+  setCampaignRecipients: (campaignId: string, recipients: CampaignRecipient[]) => void;
+  updateCampaignRecipient: (recipientId: string, updates: Partial<CampaignRecipient>) => void;
   reauthorizeGmail: () => Promise<string | null>;
+  authorizeGmailWithRedirect: () => Promise<void>;
+  enableSandboxMode: () => void;
   recordActivity: (type: ActivityLog['type'], description: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<GoogleUserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -79,184 +84,105 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [authError, setAuthError] = useState<AuthErrorInfo | null>(null);
+  const [googleClientId, setGoogleClientIdState] = useState<string>(getGoogleClientId());
 
+  // Load active user session on app start
   useEffect(() => {
-    const unsubscribeAuth = initAuth(
-      (currentUser, token) => {
-        setUser(currentUser);
-        setAccessToken(token || getCachedAccessToken());
-        setLoading(false);
-      },
-      () => {
-        setUser(null);
-        setAccessToken(null);
-        setLoading(false);
-        setLeads([]);
-        setCampaigns([]);
-        setActivities([]);
-        setProfile(null);
+    try {
+      const storedUser = localStorage.getItem(STORAGE_ACTIVE_USER);
+      if (storedUser) {
+        const parsed = JSON.parse(storedUser) as GoogleUserProfile;
+        setUser(parsed);
       }
-    );
-
-    return () => unsubscribeAuth();
+    } catch (e) {
+      console.warn('Error reading stored user session:', e);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  // Fetch or sync user profile & real-time collections when user is logged in
+  // When user changes, load their corresponding collections from persistent storage
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setLeads([]);
+      setCampaigns([]);
+      setActivities([]);
+      setProfile(null);
+      return;
+    }
 
     const leadsKey = LEADS_STORAGE_PREFIX + user.uid;
     const campaignsKey = CAMPAIGNS_STORAGE_PREFIX + user.uid;
     const profileKey = PROFILE_STORAGE_PREFIX + user.uid;
+    const activityKey = ACTIVITY_STORAGE_PREFIX + user.uid;
 
-    // Load initial cached data for instant responsiveness
-    const cachedLeads = getStored<Lead>(leadsKey);
-    if (cachedLeads.length > 0) {
-      const sanitized = cachedLeads.map((l, idx) => ({
-        ...l,
-        id: l.id || `lead_cached_${idx}_${Date.now()}`,
-      }));
-      setLeads(sanitized);
+    const storedLeads = getStored<Lead>(leadsKey);
+    setLeads(storedLeads);
+
+    const storedCampaigns = getStored<Campaign>(campaignsKey);
+    setCampaigns(storedCampaigns);
+
+    const storedActivities = getStored<ActivityLog>(activityKey);
+    setActivities(storedActivities);
+
+    const storedProfile = getStored<UserProfile>(profileKey)[0] || null;
+    if (storedProfile) {
+      setProfile(storedProfile);
+    } else {
+      const defaultProf: UserProfile = {
+        uid: user.uid,
+        email: user.email || '',
+        displayName: user.displayName || user.email.split('@')[0] || 'User',
+        photoURL: user.photoURL || '',
+        defaultSenderName: user.displayName || 'Scout Outreach Team',
+        defaultSignature: `Best regards,\n${user.displayName || 'Scout Outreach Team'}`,
+        defaultNiche: 'Indie Game Studios',
+        sendingPaceSeconds: 3,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setProfile(defaultProf);
+      setStored(profileKey, [defaultProf]);
     }
-
-    const cachedCampaigns = getStored<Campaign>(campaignsKey);
-    if (cachedCampaigns.length > 0) setCampaigns(cachedCampaigns);
-
-    const cachedProfile = getStored<UserProfile>(profileKey)[0] || null;
-    if (cachedProfile) setProfile(cachedProfile);
-
-    // Load or create User Profile
-    const userDocRef = doc(db, 'users', user.uid);
-    const unsubUser = onSnapshot(userDocRef, async (snapshot) => {
-      if (snapshot.exists()) {
-        const prof = snapshot.data() as UserProfile;
-        setProfile(prof);
-        setStored(profileKey, [prof]);
-      } else {
-        const defaultProfile: UserProfile = {
-          uid: user.uid,
-          email: user.email || '',
-          displayName: user.displayName || user.email?.split('@')[0] || 'User',
-          photoURL: user.photoURL || '',
-          defaultSenderName: user.displayName || 'Scout Team',
-          defaultSignature: `Best regards,\n${user.displayName || 'Scout Team'}`,
-          defaultNiche: 'General Business',
-          sendingPaceSeconds: 3,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        try {
-          await setDoc(userDocRef, defaultProfile);
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
-        }
-        setProfile(defaultProfile);
-        setStored(profileKey, [defaultProfile]);
-      }
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
-    });
-
-    // Real-time Leads listener
-    const leadsQuery = query(
-      collection(db, 'leads'),
-      where('userId', '==', user.uid)
-    );
-    const unsubLeads = onSnapshot(leadsQuery, (snapshot) => {
-      const docs = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Lead));
-      docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      
-      setLeads((currentLeads) => {
-        // Prevent race condition: if local state has leads marked as inSendList: true, preserve that status during sync
-        const currentSendListIds = new Set(
-          currentLeads.filter((l) => l.inSendList && l.id).map((l) => l.id!)
-        );
-        const mergedDocs = docs.map((doc) => {
-          if (doc.id && currentSendListIds.has(doc.id)) {
-            return {
-              ...doc,
-              inSendList: true,
-              outreachStatus: doc.outreachStatus === 'not_contacted' ? 'queued' : doc.outreachStatus,
-            };
-          }
-          return doc;
-        });
-        setStored(leadsKey, mergedDocs);
-        return mergedDocs;
-      });
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'leads');
-    });
-
-    // Real-time Campaigns listener
-    const campaignsQuery = query(
-      collection(db, 'campaigns'),
-      where('userId', '==', user.uid)
-    );
-    const unsubCampaigns = onSnapshot(campaignsQuery, (snapshot) => {
-      const docs = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Campaign));
-      docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setCampaigns(docs);
-      setStored(campaignsKey, docs);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'campaigns');
-    });
-
-    // Real-time Activity Logs listener
-    const activityQuery = query(
-      collection(db, 'activity_logs'),
-      where('userId', '==', user.uid)
-    );
-    const unsubActivity = onSnapshot(activityQuery, (snapshot) => {
-      const docs = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as ActivityLog));
-      docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setActivities(docs);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'activity_logs');
-    });
-
-    return () => {
-      unsubUser();
-      unsubLeads();
-      unsubCampaigns();
-      unsubActivity();
-    };
   }, [user]);
+
+  const updateGoogleClientId = (newId: string) => {
+    setGoogleClientId(newId);
+    setGoogleClientIdState(newId);
+  };
 
   const clearAuthError = () => {
     setAuthError(null);
   };
 
-  const login = async (method: 'popup' | 'redirect' = 'popup') => {
+  // Sign In with Google via official Google OAuth 2.0 / GIS Token Client
+  const login = async (_method: 'popup' | 'redirect' = 'popup') => {
     try {
       setAuthError(null);
-      if (method === 'redirect') {
-        await signInWithGoogleRedirect();
-        return;
-      }
+      const res = await requestGoogleOAuthToken('select_account');
+      if (res && res.profile) {
+        setUser(res.profile);
+        setAccessToken(res.accessToken);
+        setStored(STORAGE_ACTIVE_USER, res.profile);
 
-      const result = await signInWithGoogle();
-      if (result) {
-        setUser(result.user);
-        setAccessToken(result.accessToken);
-        // Record log
+        // Record activity log
         const logData: ActivityLog = {
-          userId: result.user.uid,
+          userId: res.profile.uid,
           type: 'gmail_connected',
-          description: `Logged in and connected Gmail (${result.user.email})`,
+          description: `Connected Google Account & Gmail (${res.profile.email})`,
           createdAt: new Date().toISOString(),
         };
-        try {
-          await addDoc(collection(db, 'activity_logs'), logData);
-        } catch (e) {
-          handleFirestoreError(e, OperationType.CREATE, 'activity_logs');
-        }
+        const actKey = ACTIVITY_STORAGE_PREFIX + res.profile.uid;
+        const currentLogs = getStored<ActivityLog>(actKey);
+        const updatedLogs = [logData, ...currentLogs];
+        setStored(actKey, updatedLogs);
+        setActivities(updatedLogs);
       }
     } catch (err: any) {
-      console.error('Login action error:', err);
-      const message = err?.friendlyMessage || err?.message || 'Authentication error';
+      console.warn('Google sign-in error:', err);
+      const message = err?.message || 'Google authentication failed';
       setAuthError({
-        code: err?.code || 'auth/unknown',
+        code: 'google_auth_error',
         message,
         hostname: typeof window !== 'undefined' ? window.location.hostname : '',
       });
@@ -268,375 +194,265 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return login('redirect');
   };
 
+  // Guest / Preview Mode so user can inspect features immediately
+  const loginAsGuest = async () => {
+    setAuthError(null);
+    const guestUser: GoogleUserProfile = {
+      uid: 'guest_user_preview',
+      email: 'preview.scout@gmail.com',
+      displayName: 'Guest Previewer',
+      photoURL: '',
+      isAnonymous: true,
+    };
+    setUser(guestUser);
+    setAccessToken('demo-guest-token');
+    setStored(STORAGE_ACTIVE_USER, guestUser);
+
+    const logData: ActivityLog = {
+      userId: guestUser.uid,
+      type: 'gmail_connected',
+      description: 'Entered Scout in Guest Mode',
+      createdAt: new Date().toISOString(),
+    };
+    const actKey = ACTIVITY_STORAGE_PREFIX + guestUser.uid;
+    const currentLogs = getStored<ActivityLog>(actKey);
+    const updated = [logData, ...currentLogs];
+    setStored(actKey, updated);
+    setActivities(updated);
+  };
+
   const logout = async () => {
-    await logOut();
     setUser(null);
     setAccessToken(null);
-    setAuthError(null);
+    setCachedAccessToken(null);
+    try {
+      localStorage.removeItem(STORAGE_ACTIVE_USER);
+    } catch {}
+    setLeads([]);
+    setCampaigns([]);
+    setActivities([]);
+    setProfile(null);
+  };
+
+  const reauthorizeGmail = async (): Promise<string | null> => {
+    try {
+      const res = await requestGoogleOAuthToken('consent', user?.email);
+      if (res) {
+        setAccessToken(res.accessToken);
+        if (res.profile) {
+          setUser(res.profile);
+          setStored(STORAGE_ACTIVE_USER, res.profile);
+        }
+        return res.accessToken;
+      }
+      return null;
+    } catch (err: any) {
+      console.warn('Reauthorize Gmail notice:', err);
+      throw err;
+    }
+  };
+
+  const authorizeGmailWithRedirect = async () => {
+    await reauthorizeGmail();
+  };
+
+  const enableSandboxMode = () => {
+    setAccessToken('demo-guest-token');
   };
 
   const updateProfile = async (data: Partial<UserProfile>) => {
-    if (!user) throw new Error('Not authenticated');
-    const updated = profile ? { ...profile, ...data, updatedAt: new Date().toISOString() } : null;
-    if (updated) {
-      setProfile(updated);
-      setStored(PROFILE_STORAGE_PREFIX + user.uid, [updated]);
-    }
-    try {
-      const userDocRef = doc(db, 'users', user.uid);
-      await updateDoc(userDocRef, { ...data, updatedAt: new Date().toISOString() });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
-    }
-  };
-
-  const recordActivity = async (type: ActivityLog['type'], description: string) => {
-    if (!user) return;
-    const logData: ActivityLog = {
-      id: 'local_' + Date.now(),
-      userId: user.uid,
-      type,
-      description,
-      createdAt: new Date().toISOString(),
+    if (!user || !profile) return;
+    const updated: UserProfile = {
+      ...profile,
+      ...data,
+      updatedAt: new Date().toISOString(),
     };
-    setActivities((prev) => [logData, ...prev]);
-    try {
-      await addDoc(collection(db, 'activity_logs'), {
-        userId: logData.userId,
-        type: logData.type,
-        description: logData.description,
-        createdAt: logData.createdAt,
-      });
-    } catch (e) {
-      handleFirestoreError(e, OperationType.CREATE, 'activity_logs');
-    }
+    setProfile(updated);
+    setStored(PROFILE_STORAGE_PREFIX + user.uid, [updated]);
   };
 
   const addLead = async (leadData: Omit<Lead, 'id' | 'userId' | 'createdAt'>): Promise<string> => {
-    if (!user) throw new Error('Not authenticated');
-    // Pre-create document reference with valid Firestore ID
-    const newRef = doc(collection(db, 'leads'));
-    const docData: Lead = {
+    const userId = user?.uid || 'guest_user';
+    const newLead: Lead = {
       ...leadData,
-      id: newRef.id,
-      userId: user.uid,
+      id: `lead_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      userId,
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
     };
 
-    // Optimistic state & local storage update
     setLeads((prev) => {
-      const updated = [docData, ...prev];
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      const updated = [newLead, ...prev];
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
 
-    try {
-      const { id: _, ...toWrite } = docData;
-      await setDoc(newRef, toWrite);
-      await recordActivity('lead_scouted', `Added lead: ${leadData.company || leadData.fullName || 'New prospect'}`);
-      return newRef.id;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'leads');
-      return newRef.id;
-    }
+    return newLead.id!;
   };
 
   const bulkAddLeads = async (leadsData: Omit<Lead, 'id' | 'userId' | 'createdAt'>[]): Promise<number> => {
-    if (!user || leadsData.length === 0) return 0;
-    
-    const now = new Date().toISOString();
-    // Pre-create document references with real Firestore IDs to avoid any mismatch between local and Firestore state
-    const newLeadsWithIds: Lead[] = leadsData.map((ld) => {
-      const newRef = doc(collection(db, 'leads'));
-      return {
-        ...ld,
-        id: newRef.id,
-        userId: user.uid,
-        createdAt: now,
-        updatedAt: now,
-      };
-    });
+    const userId = user?.uid || 'guest_user';
+    const newLeads: Lead[] = leadsData.map((l, idx) => ({
+      ...l,
+      id: `lead_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 7)}`,
+      userId,
+      createdAt: new Date().toISOString(),
+    }));
 
-    // Optimistically update state and localStorage immediately
     setLeads((prev) => {
-      const updated = [...newLeadsWithIds, ...prev];
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      const updated = [...newLeads, ...prev];
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
 
-    // Firestore batch limit is 500 operations (we use 450 chunk size)
-    const batchSize = 450;
-    let totalSaved = 0;
-
-    for (let i = 0; i < newLeadsWithIds.length; i += batchSize) {
-      const chunk = newLeadsWithIds.slice(i, i + batchSize);
-      const batch = writeBatch(db);
-
-      for (const lead of chunk) {
-        const ref = doc(db, 'leads', lead.id!);
-        const { id: _, ...docData } = lead;
-        batch.set(ref, docData);
-      }
-
-      try {
-        await batch.commit();
-        totalSaved += chunk.length;
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, 'leads');
-        totalSaved += chunk.length;
-      }
-    }
-
-    await recordActivity('lead_scouted', `Scouted and saved ${leadsData.length} lead(s)`);
-    return leadsData.length;
+    return newLeads.length;
   };
 
   const updateLead = async (id: string, updates: Partial<Lead>) => {
-    if (!user) throw new Error('Not authenticated');
-    const now = new Date().toISOString();
+    const userId = user?.uid || 'guest_user';
     setLeads((prev) => {
-      const updated = prev.map((l) => (l.id === id ? { ...l, ...updates, updatedAt: now } : l));
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      const updated = prev.map((l) => (l.id === id ? { ...l, ...updates, updatedAt: new Date().toISOString() } : l));
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
-
-    try {
-      const leadRef = doc(db, 'leads', id);
-      await setDoc(leadRef, { ...updates, updatedAt: now }, { merge: true });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `leads/${id}`);
-    }
   };
 
   const deleteLead = async (id: string) => {
-    if (!user) throw new Error('Not authenticated');
+    const userId = user?.uid || 'guest_user';
     setLeads((prev) => {
       const updated = prev.filter((l) => l.id !== id);
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
-
-    try {
-      await deleteDoc(doc(db, 'leads', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `leads/${id}`);
-    }
   };
 
   const bulkAddToSendList = async (leadIds: string[]) => {
-    if (!user) throw new Error('Not authenticated');
-    if (leadIds.length === 0) return;
-    const idSet = new Set(leadIds);
-    const now = new Date().toISOString();
-
-    // 1. Instantly update all leads in local state & localStorage
+    const userId = user?.uid || 'guest_user';
+    const targetSet = new Set(leadIds);
     setLeads((prev) => {
       const updated = prev.map((l) =>
-        l.id && idSet.has(l.id)
+        l.id && targetSet.has(l.id)
           ? {
               ...l,
               inSendList: true,
               outreachStatus: (l.outreachStatus === 'not_contacted' ? 'queued' : l.outreachStatus) as OutreachStatus,
-              updatedAt: now,
             }
           : l
       );
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
-
-    // 2. Atomically update all selected documents in Firestore batches
-    const batchSize = 450;
-    for (let i = 0; i < leadIds.length; i += batchSize) {
-      const chunk = leadIds.slice(i, i + batchSize);
-      const batch = writeBatch(db);
-
-      for (const id of chunk) {
-        const ref = doc(db, 'leads', id);
-        batch.set(
-          ref,
-          {
-            inSendList: true,
-            outreachStatus: 'queued',
-            updatedAt: now,
-          },
-          { merge: true }
-        );
-      }
-
-      try {
-        await batch.commit();
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `leads/${chunk[0]}`);
-      }
-    }
-
-    await recordActivity('send_list_added', `Moved ${leadIds.length} lead(s) to Send List`);
   };
 
   const bulkRemoveFromSendList = async (leadIds: string[]) => {
-    if (!user) throw new Error('Not authenticated');
-    if (leadIds.length === 0) return;
-    const idSet = new Set(leadIds);
-    const now = new Date().toISOString();
-
-    // 1. Instantly update local state
+    const userId = user?.uid || 'guest_user';
+    const targetSet = new Set(leadIds);
     setLeads((prev) => {
       const updated = prev.map((l) =>
-        l.id && idSet.has(l.id)
-          ? { ...l, inSendList: false, outreachStatus: 'not_contacted' as const, updatedAt: now }
+        l.id && targetSet.has(l.id)
+          ? {
+              ...l,
+              inSendList: false,
+              outreachStatus: (l.outreachStatus === 'queued' ? 'not_contacted' : l.outreachStatus) as OutreachStatus,
+            }
           : l
       );
-      setStored(LEADS_STORAGE_PREFIX + user.uid, updated);
+      setStored(LEADS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
-
-    // 2. Atomically update in Firestore batch
-    const batchSize = 450;
-    for (let i = 0; i < leadIds.length; i += batchSize) {
-      const chunk = leadIds.slice(i, i + batchSize);
-      const batch = writeBatch(db);
-
-      for (const id of chunk) {
-        const ref = doc(db, 'leads', id);
-        batch.set(
-          ref,
-          {
-            inSendList: false,
-            outreachStatus: 'not_contacted',
-            updatedAt: now,
-          },
-          { merge: true }
-        );
-      }
-
-      try {
-        await batch.commit();
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `leads/${chunk[0]}`);
-      }
-    }
   };
 
   const createCampaign = async (
     data: Omit<Campaign, 'id' | 'userId' | 'createdAt'>,
     recipientLeads: Lead[]
   ): Promise<string> => {
-    if (!user) throw new Error('Not authenticated');
-
-    const tempCampId = 'camp_' + Date.now();
-    const campaignData: Campaign = {
+    const userId = user?.uid || 'guest_user';
+    const campaignId = `camp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const newCampaign: Campaign = {
       ...data,
-      id: tempCampId,
-      userId: user.uid,
+      id: campaignId,
+      userId,
       createdAt: new Date().toISOString(),
-      totalRecipients: recipientLeads.length,
-      sentCount: 0,
-      pendingCount: recipientLeads.length,
-      failedCount: 0,
     };
 
+    // Store campaign
     setCampaigns((prev) => {
-      const updated = [campaignData, ...prev];
-      setStored(CAMPAIGNS_STORAGE_PREFIX + user.uid, updated);
+      const updated = [newCampaign, ...prev];
+      setStored(CAMPAIGNS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
 
-    try {
-      const { id: _, ...toWrite } = campaignData;
-      const campaignRef = await addDoc(collection(db, 'campaigns'), toWrite);
+    // Store recipients for this campaign
+    const recipients: CampaignRecipient[] = recipientLeads.map((l) => ({
+      id: `recip_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      campaignId,
+      userId,
+      leadId: l.id || '',
+      recipientEmail: l.email || '',
+      recipientName: l.fullName || l.company,
+      recipientCompany: l.company,
+      status: 'queued',
+    }));
+    setStored(RECIPIENTS_STORAGE_PREFIX + campaignId, recipients);
 
-      // Create Campaign Recipients
-      const replaceVariables = (text: string, lead: Lead) => {
-        return text
-          .replace(/\{\{first_name\}\}/gi, lead.firstName || lead.fullName?.split(' ')[0] || 'there')
-          .replace(/\{\{name\}\}/gi, lead.fullName || lead.firstName || 'there')
-          .replace(/\{\{last_name\}\}/gi, lead.lastName || '')
-          .replace(/\{\{company\}\}/gi, lead.company || 'your team')
-          .replace(/\{\{website\}\}/gi, lead.website || '')
-          .replace(/\{\{niche\}\}/gi, lead.niche || data.niche || 'your industry')
-          .replace(/\{\{email\}\}/gi, lead.email || '')
-          .replace(/\{\{sender_name\}\}/gi, data.senderName || 'Team')
-          .replace(/\{\{[a-zA-Z0-9_]+\}\}/g, '');
-      };
-
-      for (const lead of recipientLeads) {
-        if (!lead.id || !lead.email) continue;
-        const recipientData: CampaignRecipient = {
-          campaignId: campaignRef.id,
-          userId: user.uid,
-          leadId: lead.id,
-          recipientEmail: lead.email,
-          recipientName: lead.fullName || lead.firstName || 'Valued Partner',
-          recipientCompany: lead.company || 'Your Business',
-          status: 'queued',
-          personalizedSubject: replaceVariables(data.subject, lead),
-          personalizedBody: replaceVariables(data.body, lead),
-        };
-        await addDoc(collection(db, 'campaign_recipients'), recipientData);
-      }
-
-      setCampaigns((prev) => {
-        const updated = prev.map((c) => (c.id === tempCampId ? { ...c, id: campaignRef.id } : c));
-        setStored(CAMPAIGNS_STORAGE_PREFIX + user.uid, updated);
-        return updated;
-      });
-
-      await recordActivity('campaign_created', `Created campaign "${data.name}" with ${recipientLeads.length} recipients`);
-      return campaignRef.id;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'campaigns');
-      return tempCampId;
-    }
-  };
-
-  const reauthorizeGmail = async (): Promise<string | null> => {
-    try {
-      // If user is already authenticated, attempt quick GIS token authorization first
-      if (user?.email) {
-        try {
-          const gisToken = await requestGmailTokenViaGIS(user.email);
-          if (gisToken) {
-            setAccessToken(gisToken);
-            return gisToken;
-          }
-        } catch (e) {
-          console.warn('GIS re-auth attempt notice:', e);
-        }
-      }
-
-      const result = await signInWithGoogle();
-      if (result) {
-        setUser(result.user);
-        setAccessToken(result.accessToken);
-        return result.accessToken;
-      }
-      return null;
-    } catch (err) {
-      console.error('Failed to reauthorize Gmail:', err);
-      throw err;
-    }
+    return campaignId;
   };
 
   const updateCampaignStatus = async (id: string, status: Campaign['status']) => {
-    if (!user) throw new Error('Not authenticated');
-    const updates: any = { status };
-    if (status === 'running') updates.startedAt = new Date().toISOString();
-    if (status === 'completed' || status === 'cancelled') updates.completedAt = new Date().toISOString();
-
+    const userId = user?.uid || 'guest_user';
     setCampaigns((prev) => {
-      const updated = prev.map((c) => (c.id === id ? { ...c, ...updates } : c));
-      setStored(CAMPAIGNS_STORAGE_PREFIX + user.uid, updated);
+      const updated = prev.map((c) => (c.id === id ? { ...c, status } : c));
+      setStored(CAMPAIGNS_STORAGE_PREFIX + userId, updated);
       return updated;
     });
+  };
 
-    try {
-      const ref = doc(db, 'campaigns', id);
-      await updateDoc(ref, updates);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `campaigns/${id}`);
+  const updateCampaign = async (id: string, updates: Partial<Campaign>) => {
+    const userId = user?.uid || 'guest_user';
+    setCampaigns((prev) => {
+      const updated = prev.map((c) => (c.id === id ? { ...c, ...updates } : c));
+      setStored(CAMPAIGNS_STORAGE_PREFIX + userId, updated);
+      return updated;
+    });
+  };
+
+  const getCampaignRecipients = (campaignId: string): CampaignRecipient[] => {
+    return getStored<CampaignRecipient>(RECIPIENTS_STORAGE_PREFIX + campaignId);
+  };
+
+  const setCampaignRecipients = (campaignId: string, recipients: CampaignRecipient[]) => {
+    setStored(RECIPIENTS_STORAGE_PREFIX + campaignId, recipients);
+  };
+
+  const updateCampaignRecipient = (recipientId: string, updates: Partial<CampaignRecipient>) => {
+    // Find matching campaign
+    for (const campaign of campaigns) {
+      if (!campaign.id) continue;
+      const key = RECIPIENTS_STORAGE_PREFIX + campaign.id;
+      const list = getStored<CampaignRecipient>(key);
+      const matchIdx = list.findIndex((r) => r.id === recipientId);
+      if (matchIdx !== -1) {
+        list[matchIdx] = { ...list[matchIdx], ...updates };
+        setStored(key, list);
+        break;
+      }
     }
+  };
+
+  const recordActivity = async (type: ActivityLog['type'], description: string) => {
+    const userId = user?.uid || 'guest_user';
+    const newLog: ActivityLog = {
+      id: `act_${Date.now()}`,
+      userId,
+      type,
+      description,
+      createdAt: new Date().toISOString(),
+    };
+    const actKey = ACTIVITY_STORAGE_PREFIX + userId;
+    setActivities((prev) => {
+      const updated = [newLog, ...prev];
+      setStored(actKey, updated);
+      return updated;
+    });
   };
 
   return (
@@ -650,8 +466,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         campaigns,
         activities,
         authError,
+        googleClientId,
+        updateGoogleClientId,
         login,
         loginWithRedirect,
+        loginAsGuest,
         clearAuthError,
         logout,
         updateProfile,
@@ -663,7 +482,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         bulkRemoveFromSendList,
         createCampaign,
         updateCampaignStatus,
+        updateCampaign,
+        getCampaignRecipients,
+        setCampaignRecipients,
+        updateCampaignRecipient,
         reauthorizeGmail,
+        authorizeGmailWithRedirect,
+        enableSandboxMode,
         recordActivity,
       }}
     >
@@ -674,6 +499,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
   return context;
 };

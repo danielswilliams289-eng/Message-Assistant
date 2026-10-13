@@ -21,8 +21,6 @@ import {
   Mail,
   ShieldCheck,
 } from 'lucide-react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
 import { useAuth } from '../lib/AuthContext';
 import { Lead, EmailValidationStatus, OutreachStatus } from '../types';
 
@@ -100,16 +98,9 @@ export const LeadsView: React.FC<LeadsViewProps> = ({ onOpenLeadDetail, onNaviga
     setIsExporting(true);
 
     try {
-      const q = query(collection(db, 'leads'), where('userId', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      const fetchedDocs: Lead[] = querySnapshot.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<Lead, 'id'>),
-      }));
-
       const leadsToExport =
         selectedIds.length > 0
-          ? fetchedDocs.filter((l) => l.id && selectedIds.includes(l.id))
+          ? leads.filter((l) => l.id && selectedIds.includes(l.id))
           : filteredLeads;
 
       if (leadsToExport.length === 0) {

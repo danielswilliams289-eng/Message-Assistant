@@ -238,7 +238,12 @@ export const ScoutView: React.FC<ScoutViewProps> = ({ onLeadsScouted }) => {
           value={sources}
           onChange={(e) => setSources(e.target.value)}
           disabled={loading}
-          placeholder="Drop URLs, public source text, directories, websites, or other authorized lead sources here...&#10;&#10;e.g.:&#10;https://example.com&#10;John Smith, CEO at Apex Games, contact@apexgames.io&#10;Studio XYZ | studioxyz.com | dev@studioxyz.com | San Francisco"
+          placeholder={`Paste Steam store URLs, search results, video game titles, company websites, or directories here...
+
+e.g.:
+• https://store.steampowered.com/app/1966720/Lethal_Company/
+• Balatro, Terraria, Hades, Slay the Spire
+• Steam search dumps or store links`}
           className="w-full bg-[#080b13] border border-[#182033] rounded-2xl p-4 text-xs sm:text-sm text-slate-200 placeholder-slate-600 font-mono focus:outline-none focus:border-cyan-500/80 transition-all resize-y"
         />
 

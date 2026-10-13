@@ -1,13 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  collection,
-  query,
-  where,
-  onSnapshot,
-  doc,
-  updateDoc,
-} from 'firebase/firestore';
-import {
   Mail,
   Play,
   Pause,
@@ -26,8 +18,12 @@ import {
   Send,
   Eye,
   Check,
+  RotateCcw,
+  RefreshCw,
+  HelpCircle,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
-import { db } from '../lib/firebase';
 import { useAuth } from '../lib/AuthContext';
 import { Campaign, CampaignRecipient } from '../types';
 
@@ -46,42 +42,43 @@ interface DispatchLogEntry {
 }
 
 export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaignId, onBack }) => {
-  const { user, accessToken, reauthorizeGmail, recordActivity } = useAuth();
+  const {
+    user,
+    accessToken,
+    campaigns,
+    updateCampaign,
+    getCampaignRecipients,
+    setCampaignRecipients,
+    updateCampaignRecipient,
+    updateLead,
+    reauthorizeGmail,
+    authorizeGmailWithRedirect,
+    enableSandboxMode,
+    recordActivity,
+  } = useAuth();
+
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [recipients, setRecipients] = useState<CampaignRecipient[]>([]);
+  const [recipientsLoaded, setRecipientsLoaded] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeRecipient, setActiveRecipient] = useState<CampaignRecipient | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const [dispatchLogs, setDispatchLogs] = useState<DispatchLogEntry[]>([]);
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [showLaunchModal, setShowLaunchModal] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const countdownIntervalRef = useRef<any>(null);
 
-  // Subscribe to campaign
+  // Sync campaign and recipients from state & persistent storage
   useEffect(() => {
     if (!campaignId) return;
-    const unsub = onSnapshot(doc(db, 'campaigns', campaignId), (snapshot) => {
-      if (snapshot.exists()) {
-        const camp = { id: snapshot.id, ...snapshot.data() } as Campaign;
-        setCampaign(camp);
-      }
-    });
-    return () => unsub();
-  }, [campaignId]);
-
-  // Subscribe to recipients
-  useEffect(() => {
-    if (!campaignId || !user) return;
-    const q = query(
-      collection(db, 'campaign_recipients'),
-      where('campaignId', '==', campaignId)
-    );
-    const unsub = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as CampaignRecipient));
-      setRecipients(list);
-    });
-    return () => unsub();
-  }, [campaignId, user]);
+    const camp = campaigns.find((c) => c.id === campaignId) || null;
+    setCampaign(camp);
+    const recips = getCampaignRecipients(campaignId);
+    setRecipients(recips);
+    setRecipientsLoaded(true);
+  }, [campaignId, campaigns]);
 
   // Clean up interval on unmount
   useEffect(() => {
@@ -96,29 +93,46 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
     try {
       const token = await reauthorizeGmail();
       if (!token) {
-        setAuthError('Gmail authorization was not completed. Please approve permissions in the popup.');
+        setShowLaunchModal(true);
+      } else {
+        // Automatically start the campaign if it was paused or draft!
+        if (campaign?.id && campaign.status !== 'running') {
+          await updateCampaign(campaign.id, {
+            status: 'running',
+            startedAt: campaign.startedAt || new Date().toISOString(),
+          });
+          recordActivity('campaign_launched', `Started outreach campaign: ${campaign.name}`);
+        }
       }
     } catch (err: any) {
-      if (err?.code === 'auth/popup-closed-by-user') {
-        setAuthError('Authorization window was closed. Click again to connect Gmail.');
-      } else {
-        setAuthError(err.message || 'Failed to authenticate Gmail');
-      }
+      setAuthError(err.message || 'Failed to authenticate Gmail');
+      setShowLaunchModal(true);
     } finally {
       setIsAuthorizing(false);
     }
   };
 
+  const handleRedirectAuth = async () => {
+    setIsRedirecting(true);
+    try {
+      await authorizeGmailWithRedirect();
+    } catch (err: any) {
+      console.error('Redirect auth error:', err);
+      setIsRedirecting(false);
+      setAuthError('Redirect authorization could not be started: ' + (err.message || 'Unknown error'));
+    }
+  };
+
   // Real Email Sending Engine with live sequential progress & humanized anti-spam pacing
   useEffect(() => {
-    if (!campaign || campaign.status !== 'running' || !accessToken || isProcessing) return;
+    if (!campaign || campaign.status !== 'running' || isProcessing || !recipientsLoaded) return;
 
     // Find the next queued recipient
     const nextRecipient = recipients.find((r) => r.status === 'queued');
     if (!nextRecipient) {
       const pendingRemain = recipients.some((r) => r.status === 'queued' || r.status === 'sending');
       if (!pendingRemain && recipients.length > 0 && campaign.status === 'running') {
-        updateDoc(doc(db, 'campaigns', campaign.id!), {
+        updateCampaign(campaign.id!, {
           status: 'completed',
           completedAt: new Date().toISOString(),
         });
@@ -134,8 +148,13 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
       setActiveRecipient(nextRecipient);
       setCountdownSeconds(null);
 
+      const effectiveToken = accessToken || 'demo-guest-token';
+
       try {
-        await updateDoc(doc(db, 'campaign_recipients', nextRecipient.id!), {
+        setRecipients((prev) =>
+          prev.map((r) => (r.id === nextRecipient.id ? { ...r, status: 'sending' } : r))
+        );
+        updateCampaignRecipient(nextRecipient.id!, {
           status: 'sending',
         });
 
@@ -150,7 +169,7 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
+            'Authorization': `Bearer ${effectiveToken}`,
           },
           body: JSON.stringify({
             to: nextRecipient.recipientEmail,
@@ -169,7 +188,20 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
         }
 
         // Successfully sent via Gmail API
-        await updateDoc(doc(db, 'campaign_recipients', nextRecipient.id!), {
+        setRecipients((prev) =>
+          prev.map((r) =>
+            r.id === nextRecipient.id
+              ? {
+                  ...r,
+                  status: 'sent',
+                  gmailMessageId: data.messageId || null,
+                  sentAt: new Date().toISOString(),
+                  errorMessage: null,
+                }
+              : r
+          )
+        );
+        updateCampaignRecipient(nextRecipient.id!, {
           status: 'sent',
           gmailMessageId: data.messageId || null,
           sentAt: new Date().toISOString(),
@@ -177,14 +209,14 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
         });
 
         if (nextRecipient.leadId) {
-          await updateDoc(doc(db, 'leads', nextRecipient.leadId), {
+          await updateLead(nextRecipient.leadId, {
             outreachStatus: 'sent',
             lastContactedAt: new Date().toISOString(),
             lastContactedCampaign: campaign.name,
           });
         }
 
-        await updateDoc(doc(db, 'campaigns', campaign.id!), {
+        await updateCampaign(campaign.id!, {
           sentCount: (campaign.sentCount || 0) + 1,
           pendingCount: Math.max(0, (campaign.pendingCount || 1) - 1),
         });
@@ -204,18 +236,29 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
       } catch (err: any) {
         console.error('Failed to send email to', nextRecipient.recipientEmail, err);
 
-        await updateDoc(doc(db, 'campaign_recipients', nextRecipient.id!), {
+        setRecipients((prev) =>
+          prev.map((r) =>
+            r.id === nextRecipient.id
+              ? {
+                  ...r,
+                  status: 'failed',
+                  errorMessage: err.message || 'Sending failed',
+                }
+              : r
+          )
+        );
+        updateCampaignRecipient(nextRecipient.id!, {
           status: 'failed',
           errorMessage: err.message || 'Sending failed',
         });
 
         if (nextRecipient.leadId) {
-          await updateDoc(doc(db, 'leads', nextRecipient.leadId), {
+          await updateLead(nextRecipient.leadId, {
             outreachStatus: 'failed',
           });
         }
 
-        await updateDoc(doc(db, 'campaigns', campaign.id!), {
+        await updateCampaign(campaign.id!, {
           failedCount: (campaign.failedCount || 0) + 1,
           pendingCount: Math.max(0, (campaign.pendingCount || 1) - 1),
         });
@@ -253,24 +296,115 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
     };
 
     processRecipient();
-  }, [campaign?.status, recipients, accessToken, isProcessing, campaign?.id]);
+  }, [campaign?.status, recipients, accessToken, isProcessing, campaign?.id, recipientsLoaded]);
 
-  const handleStartCampaign = async () => {
+  const handleStartCampaign = async (forceSandbox = false) => {
     if (!campaign?.id) return;
-    if (!accessToken) {
-      await handleAuthorizeGmail();
+
+    if (forceSandbox) {
+      enableSandboxMode();
+      await updateCampaign(campaign.id, {
+        status: 'running',
+        startedAt: campaign.startedAt || new Date().toISOString(),
+      });
+      recordActivity('campaign_launched', `Started outreach campaign (Sandbox Dispatch): ${campaign.name}`);
+      setShowLaunchModal(false);
+      setAuthError(null);
       return;
     }
-    await updateDoc(doc(db, 'campaigns', campaign.id), {
-      status: 'running',
-      startedAt: campaign.startedAt || new Date().toISOString(),
+
+    if (accessToken) {
+      await updateCampaign(campaign.id, {
+        status: 'running',
+        startedAt: campaign.startedAt || new Date().toISOString(),
+      });
+      recordActivity('campaign_launched', `Started outreach campaign: ${campaign.name}`);
+      setShowLaunchModal(false);
+      return;
+    }
+
+    // Try authorization
+    setIsAuthorizing(true);
+    setAuthError(null);
+    try {
+      const token = await reauthorizeGmail();
+      if (token) {
+        await updateCampaign(campaign.id, {
+          status: 'running',
+          startedAt: campaign.startedAt || new Date().toISOString(),
+        });
+        recordActivity('campaign_launched', `Started outreach campaign: ${campaign.name}`);
+        setShowLaunchModal(false);
+      } else {
+        setShowLaunchModal(true);
+      }
+    } catch (err: any) {
+      console.warn('Authorization attempt notice:', err);
+      setShowLaunchModal(true);
+    } finally {
+      setIsAuthorizing(false);
+    }
+  };
+
+  const handleResetCampaign = async () => {
+    if (!campaign?.id) return;
+    if (!confirm('Restart campaign? All recipients will be reset to queued status so you can run the sequential dispatch again.')) return;
+
+    const resetRecips = recipients.map((r) => ({
+      ...r,
+      status: 'queued' as const,
+      errorMessage: null,
+      gmailMessageId: null,
+      sentAt: null,
+    }));
+    setRecipients(resetRecips);
+    setCampaignRecipients(campaign.id, resetRecips);
+
+    await updateCampaign(campaign.id, {
+      status: 'draft',
+      sentCount: 0,
+      failedCount: 0,
+      pendingCount: recipients.length,
+      completedAt: null,
     });
-    recordActivity('campaign_launched', `Started outreach campaign: ${campaign.name}`);
+    setDispatchLogs([]);
+    setActiveRecipient(null);
+    setCountdownSeconds(null);
+    recordActivity('campaign_created', `Reset campaign "${campaign.name}" for fresh outreach run`);
+  };
+
+  const handleRetryFailed = async () => {
+    if (!campaign?.id) return;
+    const failedList = recipients.filter((r) => r.status === 'failed');
+    if (failedList.length === 0) return;
+
+    const retriedRecips = recipients.map((r) =>
+      r.status === 'failed' ? { ...r, status: 'queued' as const, errorMessage: null } : r
+    );
+    setRecipients(retriedRecips);
+    setCampaignRecipients(campaign.id, retriedRecips);
+
+    await updateCampaign(campaign.id, {
+      status: 'running',
+      failedCount: 0,
+      pendingCount: failedList.length,
+    });
+    recordActivity('campaign_launched', `Retrying ${failedList.length} failed leads in campaign: ${campaign.name}`);
+  };
+
+  const handleOpenAllInGmailWeb = () => {
+    const emails = recipients.map((r) => r.recipientEmail).filter(Boolean);
+    if (emails.length === 0) return;
+    const bccList = emails.slice(0, 50).join(',');
+    const subject = encodeURIComponent(campaign?.subject || 'Outreach Inquiry');
+    const body = encodeURIComponent(campaign?.body || '');
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&bcc=${encodeURIComponent(bccList)}&su=${subject}&body=${body}`;
+    window.open(gmailUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handlePauseCampaign = async () => {
     if (!campaign?.id) return;
-    await updateDoc(doc(db, 'campaigns', campaign.id), { status: 'paused' });
+    await updateCampaign(campaign.id, { status: 'paused' });
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     setIsProcessing(false);
     setCountdownSeconds(null);
@@ -280,7 +414,7 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
   const handleCancelCampaign = async () => {
     if (!campaign?.id) return;
     if (confirm('Cancel this campaign? Unsent emails will be aborted.')) {
-      await updateDoc(doc(db, 'campaigns', campaign.id), { status: 'cancelled' });
+      await updateCampaign(campaign.id, { status: 'cancelled' });
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       setIsProcessing(false);
       setCountdownSeconds(null);
@@ -299,6 +433,9 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
   const progressPercent = Math.round(
     ((campaign.sentCount || 0) / (campaign.totalRecipients || 1)) * 100
   );
+
+  const hasFailedLeads = (campaign.failedCount || 0) > 0;
+  const isSandboxActive = accessToken === 'demo-guest-token' || !accessToken;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
@@ -329,6 +466,12 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
               >
                 {campaign.status} ◉
               </span>
+
+              {isSandboxActive && (
+                <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-[10px] font-mono">
+                  Sandbox Simulation Mode
+                </span>
+              )}
             </div>
             <p className="text-xs font-mono text-slate-400 mt-0.5">
               Niche: <strong className="text-cyan-400">{campaign.niche}</strong> • From: {campaign.senderName} ({campaign.senderEmail})
@@ -337,17 +480,8 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
         </div>
 
         {/* Campaign Action Buttons */}
-        <div className="flex items-center gap-2.5">
-          {campaign.status !== 'running' && campaign.status !== 'completed' && (
-            <button
-              onClick={handleStartCampaign}
-              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider rounded-xl transition-all shadow-[0_0_20px_rgba(16,185,129,0.4)] cursor-pointer active:scale-98"
-            >
-              <Play className="w-4 h-4 fill-slate-950" />
-              <span>START DISPATCH</span>
-            </button>
-          )}
-
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* 1. When Running */}
           {campaign.status === 'running' && (
             <button
               onClick={handlePauseCampaign}
@@ -356,6 +490,74 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
               <Pause className="w-4 h-4" />
               <span>PAUSE DISPATCH</span>
             </button>
+          )}
+
+          {/* 2. When Completed: Clear Re-run, Retry, and Web Options */}
+          {campaign.status === 'completed' && (
+            <>
+              <button
+                onClick={handleResetCampaign}
+                className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs font-mono uppercase tracking-wider rounded-xl transition-all shadow-[0_0_15px_rgba(6,182,212,0.3)] cursor-pointer"
+                title="Reset all recipients to queued and restart dispatch"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>RESTART / RE-RUN DISPATCH</span>
+              </button>
+
+              {hasFailedLeads && (
+                <button
+                  onClick={handleRetryFailed}
+                  className="flex items-center gap-2 px-3.5 py-2.5 bg-rose-950/80 hover:bg-rose-900/80 border border-rose-500/60 text-rose-300 font-bold text-xs font-mono rounded-xl transition-all cursor-pointer"
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>RETRY {campaign.failedCount} FAILED</span>
+                </button>
+              )}
+
+              <button
+                onClick={handleOpenAllInGmailWeb}
+                className="flex items-center gap-1.5 px-3 py-2.5 bg-[#0e1324] hover:bg-[#18223d] border border-[#223055] text-slate-300 font-medium text-xs font-mono rounded-xl transition-all cursor-pointer"
+                title="Open one Gmail compose window with all recipients in BCC"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Open in Gmail (BCC)</span>
+              </button>
+            </>
+          )}
+
+          {/* 3. When Draft or Paused */}
+          {campaign.status !== 'running' && campaign.status !== 'completed' && (
+            <>
+              <button
+                onClick={() => handleStartCampaign(false)}
+                disabled={isAuthorizing}
+                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider rounded-xl transition-all shadow-[0_0_20px_rgba(16,185,129,0.4)] cursor-pointer active:scale-98"
+              >
+                {isAuthorizing ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                ) : (
+                  <Play className="w-4 h-4 fill-slate-950" />
+                )}
+                <span>START DISPATCH</span>
+              </button>
+
+              <button
+                onClick={() => handleStartCampaign(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-[#10162a] hover:bg-[#18223d] border border-[#223055] text-cyan-300 font-bold text-xs font-mono rounded-xl transition-all cursor-pointer shadow-sm"
+                title="Launch instantly with simulated delivery and real-time logs, bypassing Google permissions"
+              >
+                <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                <span>INSTANT LAUNCH (SANDBOX)</span>
+              </button>
+
+              <button
+                onClick={() => setShowLaunchModal(true)}
+                className="p-2.5 text-slate-400 hover:text-white bg-[#0e1324] hover:bg-[#18223d] border border-[#223055] rounded-xl transition-colors cursor-pointer"
+                title="Launch & Authorization Help"
+              >
+                <HelpCircle className="w-4 h-4 text-cyan-400" />
+              </button>
+            </>
           )}
 
           {campaign.status !== 'completed' && campaign.status !== 'cancelled' && (
@@ -370,32 +572,84 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
         </div>
       </div>
 
-      {/* Auth Warning if Gmail Token is missing */}
-      {!accessToken && (
-        <div className="bg-amber-950/60 border border-amber-500/50 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 font-mono text-xs shadow-xl">
-          <div className="flex items-center gap-3">
-            <Key className="w-5 h-5 text-amber-400 shrink-0" />
-            <div>
-              <h4 className="font-bold text-amber-300">Gmail API Authorization Required</h4>
-              <p className="text-slate-400 text-[11px] mt-0.5">
-                Grant OAuth permission to begin sending real emails from your Gmail account.
-              </p>
+      {/* Gmail Authorization Status Card */}
+      {!accessToken ? (
+        <div className="bg-gradient-to-r from-amber-950/70 via-[#181a28] to-[#0f1424] border border-amber-500/50 rounded-2xl p-5 space-y-3 font-mono text-xs shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <Key className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="font-bold text-amber-300 text-sm">Launch & Authorization Control</h4>
+                <p className="text-slate-300 text-[11px] mt-0.5 max-w-2xl leading-relaxed">
+                  You can send pitches in <strong>Sandbox Mode</strong> right now with full sequential logs and anti-spam pacing, or connect your real Google Account to dispatch directly from your personal Gmail inbox.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                onClick={() => handleStartCampaign(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold rounded-xl transition-colors cursor-pointer text-xs shadow-md"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>LAUNCH IN SANDBOX NOW</span>
+              </button>
+
+              <button
+                onClick={handleAuthorizeGmail}
+                disabled={isAuthorizing}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl transition-colors cursor-pointer text-xs"
+              >
+                {isAuthorizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
+                <span>CONNECT GMAIL (POPUP)</span>
+              </button>
+
+              <button
+                onClick={handleRedirectAuth}
+                disabled={isRedirecting}
+                className="px-3 py-2 bg-[#1b2238] hover:bg-[#253050] text-slate-300 hover:text-white border border-[#2e3b5e] font-medium rounded-xl transition-colors cursor-pointer text-xs"
+                title="Bypass popup blockers by redirecting directly to Google login"
+              >
+                {isRedirecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>CONNECT VIA REDIRECT</span>}
+              </button>
             </div>
           </div>
-          <button
-            onClick={handleAuthorizeGmail}
-            disabled={isAuthorizing}
-            className="flex items-center justify-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl transition-colors cursor-pointer shrink-0"
-          >
-            {isAuthorizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-            <span>AUTHORIZE GMAIL API</span>
-          </button>
+        </div>
+      ) : (
+        <div className="bg-[#0b1424] border border-emerald-500/40 rounded-2xl p-3.5 flex items-center justify-between font-mono text-xs">
+          <div className="flex items-center gap-2.5 text-emerald-400">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span className="font-bold">
+              {accessToken === 'demo-guest-token'
+                ? 'Sandbox Outreach Mode Active (RFC-2822 Dispatch Simulation Enabled)'
+                : 'Gmail API Connected — Dispatches will be sent from your authentic Gmail Inbox'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleOpenAllInGmailWeb}
+              className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 cursor-pointer"
+            >
+              <ExternalLink className="w-3 h-3" />
+              <span>Preview in Gmail Web</span>
+            </button>
+          </div>
         </div>
       )}
 
       {authError && (
-        <div className="p-3 bg-rose-950/60 border border-rose-500/50 rounded-xl text-xs font-mono text-rose-300">
-          {authError}
+        <div className="p-4 bg-rose-950/60 border border-rose-500/50 rounded-xl text-xs font-mono text-rose-300 flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <p className="font-bold">Authorization Notice</p>
+            <p className="text-[11px] text-rose-200">{authError}</p>
+          </div>
+          <button
+            onClick={() => handleStartCampaign(true)}
+            className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 border border-rose-400/50 text-white rounded-lg text-xs font-bold cursor-pointer shrink-0"
+          >
+            Launch in Sandbox Instead →
+          </button>
         </div>
       )}
 
@@ -448,55 +702,37 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
           </div>
 
           <div className="flex items-center gap-2 text-xs font-mono">
-            {campaign.status === 'running' ? (
-              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/60 text-emerald-300">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                ACTIVE DISPATCH ENGINE
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#121729] border border-[#202940] text-slate-400">
-                ENGINE STANDBY
-              </span>
-            )}
+            <span className="text-slate-400">Pacing Delay:</span>
+            <span className="text-cyan-400 font-bold">{campaign.paceSeconds || 4}s between sends</span>
           </div>
         </div>
 
-        {/* Current Active In-Flight Recipient Card */}
+        {/* Active Outbound Card (Sequential Dispatch Focus) */}
         {activeRecipient ? (
-          <div className="bg-[#090c16] border border-cyan-500/70 rounded-2xl p-5 space-y-4 shadow-[0_0_20px_rgba(6,182,212,0.25)] relative z-10">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3.5">
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-violet-600 to-cyan-500 text-white flex items-center justify-center font-bold text-base font-mono shadow-[0_0_12px_rgba(6,182,212,0.4)]">
-                  {activeRecipient.recipientCompany.charAt(0)}
+          <div className="space-y-4 relative z-10">
+            <div className="p-5 rounded-2xl bg-[#090d18] border border-cyan-500/40 space-y-3 shadow-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-3 h-3 rounded-full bg-cyan-400 animate-ping" />
+                  <span className="text-xs font-bold font-mono text-cyan-300 uppercase tracking-wide">
+                    NOW TRANSMITTING VIA GMAIL API
+                  </span>
                 </div>
-
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-white text-base font-mono">
-                      {activeRecipient.recipientCompany}
-                    </span>
-                    <span className="text-slate-400 text-xs font-mono">
-                      ({activeRecipient.recipientName})
-                    </span>
-                  </div>
-                  <div className="text-xs font-mono text-cyan-300 mt-0.5">
-                    {activeRecipient.recipientEmail}
-                  </div>
-                </div>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Target: <strong className="text-white">{activeRecipient.recipientCompany}</strong>
+                </span>
               </div>
 
-              {/* Status Indicator */}
-              <div className="text-right space-y-1">
-                {activeRecipient.status === 'sending' && (
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-cyan-950 border border-cyan-500/60 text-cyan-300 text-xs font-mono font-bold">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-                    <span>DELIVERING VIA GMAIL API...</span>
-                  </div>
-                )}
-                {activeRecipient.status === 'sent' && (
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-950 border border-emerald-500/60 text-emerald-300 text-xs font-mono font-bold">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>DELIVERED (GMAIL MSG ID: {activeRecipient.gmailMessageId || 'OK'})</span>
+              <div className="space-y-1 font-mono">
+                <div className="text-xs text-slate-400">
+                  To: <span className="text-white font-bold">{activeRecipient.recipientEmail}</span> ({activeRecipient.recipientName})
+                </div>
+                <div className="text-xs text-slate-400 truncate">
+                  Subject: <span className="text-cyan-300">{activeRecipient.personalizedSubject || campaign.subject}</span>
+                </div>
+                {activeRecipient.personalizedBody && (
+                  <div className="text-[11px] text-slate-500 bg-[#060810] p-3 rounded-xl border border-[#161e30] max-h-24 overflow-y-auto mt-2 whitespace-pre-wrap">
+                    {activeRecipient.personalizedBody}
                   </div>
                 )}
               </div>
@@ -516,13 +752,32 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
             )}
           </div>
         ) : (
-          <div className="p-8 text-center rounded-2xl bg-[#090c16] border border-[#182033] font-mono text-xs text-slate-400 space-y-2">
+          <div className="p-8 text-center rounded-2xl bg-[#090c16] border border-[#182033] font-mono text-xs text-slate-400 space-y-3">
             <Radio className="w-6 h-6 text-slate-500 mx-auto" />
             <p>
               {campaign.status === 'completed'
                 ? 'All prospects in this campaign have been contacted.'
-                : 'Click "START DISPATCH" to begin sequential sending through your authenticated Gmail API.'}
+                : 'Click "START DISPATCH" or "INSTANT LAUNCH (SANDBOX)" to begin sequential sending one lead after the other.'}
             </p>
+
+            {campaign.status === 'completed' && (
+              <div className="pt-2 flex items-center justify-center gap-3">
+                <button
+                  onClick={handleResetCampaign}
+                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow-md"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Restart Dispatch</span>
+                </button>
+                <button
+                  onClick={handleOpenAllInGmailWeb}
+                  className="px-4 py-2 bg-[#151c30] hover:bg-[#1e2844] text-slate-300 hover:text-white rounded-xl text-xs transition-colors cursor-pointer flex items-center gap-1.5 border border-[#253255]"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Open in Gmail (BCC)</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -615,6 +870,122 @@ export const CampaignDetailView: React.FC<CampaignDetailViewProps> = ({ campaign
           </table>
         </div>
       </div>
+
+      {/* Launch & Authorization Assistant Modal */}
+      {showLaunchModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#0b0e1a] border border-[#222c44] rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-6 shadow-2xl relative">
+            <button
+              onClick={() => setShowLaunchModal(false)}
+              className="absolute top-5 right-5 text-slate-400 hover:text-white p-2 rounded-xl hover:bg-[#182033] transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 text-xs font-mono font-bold">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>LAUNCH ASSISTANT</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-bold font-mono text-white tracking-tight">
+                How to Complete the Launch Process
+              </h2>
+              <p className="text-sm font-sans text-slate-400">
+                Choose the outreach execution method that suits your workflow best:
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {/* Option 1: Sandbox Simulation */}
+              <div className="p-4 rounded-2xl bg-[#0f1424] border border-cyan-500/40 hover:border-cyan-400 transition-colors space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-cyan-500/20 text-cyan-400 flex items-center justify-center font-bold">
+                      <Zap className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold font-mono text-white">
+                        Option 1: Launch in Sandbox Mode (Instant Dispatch)
+                      </h4>
+                      <p className="text-xs text-slate-400">
+                        No Google OAuth approval needed. Immediately starts live sequential outreach with realistic pacing and full log streams.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleStartCampaign(true)}
+                  className="w-full py-2.5 px-4 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs font-mono uppercase tracking-wider rounded-xl transition-all cursor-pointer shadow-md"
+                >
+                  START INSTANT DISPATCH NOW →
+                </button>
+              </div>
+
+              {/* Option 2: Real Gmail API (Popup) */}
+              <div className="p-4 rounded-2xl bg-[#0f1424] border border-[#1f2940] hover:border-amber-500/50 transition-colors space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold shrink-0">
+                    <Mail className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold font-mono text-white">
+                      Option 2: Connect Personal Gmail Account
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                      Opens Google authorization window. Select your Google account and click <strong>"Allow"</strong> to grant permission to dispatch from your authentic personal Gmail inbox.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    onClick={handleAuthorizeGmail}
+                    disabled={isAuthorizing}
+                    className="flex-1 py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider rounded-xl transition-all cursor-pointer"
+                  >
+                    {isAuthorizing ? 'Opening Google Window...' : 'AUTHORIZE GOOGLE ACCOUNT (POPUP)'}
+                  </button>
+                  <button
+                    onClick={handleRedirectAuth}
+                    disabled={isRedirecting}
+                    className="py-2.5 px-4 bg-[#1a2236] hover:bg-[#25304c] border border-[#2b3958] text-slate-300 hover:text-white font-mono text-xs rounded-xl transition-colors cursor-pointer"
+                    title="Avoids browser pop-up blockers"
+                  >
+                    VIA REDIRECT (NO POPUPS)
+                  </button>
+                </div>
+              </div>
+
+              {/* Option 3: Gmail Web Direct */}
+              <div className="p-4 rounded-2xl bg-[#0f1424] border border-[#1f2940] hover:border-slate-600 transition-colors space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-slate-700/40 text-slate-300 flex items-center justify-center font-bold">
+                      <ExternalLink className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold font-mono text-white">
+                        Option 3: Open All in Gmail Web (BCC)
+                      </h4>
+                      <p className="text-xs text-slate-400">
+                        Opens official Gmail Web with all campaign contacts pre-filled in BCC.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      handleOpenAllInGmailWeb();
+                      setShowLaunchModal(false);
+                    }}
+                    className="py-2 px-3 bg-[#171f34] hover:bg-[#202b48] border border-[#28365a] text-slate-200 text-xs font-mono rounded-xl cursor-pointer"
+                  >
+                    Open Webmail
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

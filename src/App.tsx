@@ -8,6 +8,7 @@ import { GmailConnectionView } from './components/GmailConnectionView';
 import { LeadDetailModal } from './components/LeadDetailModal';
 import { CreateCampaignModal } from './components/CreateCampaignModal';
 import { VercelPopupHelperModal } from './components/VercelPopupHelperModal';
+import { GoogleAuthConnectView } from './components/GoogleAuthConnectView';
 import { Lead } from './types';
 import {
   Gamepad2,
@@ -26,7 +27,7 @@ import {
 export type AppViewMode = 'scout_and_send' | 'saved_leads' | 'campaigns' | 'gmail_settings';
 
 export default function App() {
-  const { user, loading, login, loginWithRedirect, logout, campaigns, accessToken, reauthorizeGmail, leads, authError, clearAuthError } = useAuth();
+  const { user, loading, login, loginWithRedirect, loginAsGuest, logout, campaigns, accessToken, reauthorizeGmail, leads, authError, clearAuthError } = useAuth();
   const [currentView, setCurrentView] = useState<AppViewMode>('scout_and_send');
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [selectedLeadDetail, setSelectedLeadDetail] = useState<Lead | null>(null);
@@ -38,9 +39,31 @@ export default function App() {
   const handleLogin = async () => {
     setLoginLoading(true);
     try {
-      await login();
+      await login('popup');
     } catch (e: any) {
       console.warn('Sign-in notice:', e);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLoginWithRedirect = async () => {
+    setLoginLoading(true);
+    try {
+      await loginWithRedirect();
+    } catch (e: any) {
+      console.warn('Sign-in redirect notice:', e);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLoginAsGuest = async () => {
+    setLoginLoading(true);
+    try {
+      await loginAsGuest();
+    } catch (e: any) {
+      console.warn('Guest sign-in notice:', e);
     } finally {
       setLoginLoading(false);
     }
@@ -76,6 +99,29 @@ export default function App() {
           </div>
         </div>
       </div>
+    );
+  }
+
+  // Gated View: If user is not authenticated, show ONLY Google Auth and Connect screen
+  if (!user) {
+    return (
+      <>
+        <GoogleAuthConnectView
+          onLogin={handleLogin}
+          onLoginWithRedirect={handleLoginWithRedirect}
+          onLoginAsGuest={handleLoginAsGuest}
+          authError={authError}
+          clearAuthError={clearAuthError}
+          loading={loginLoading}
+        />
+        {isHelperOpen && (
+          <VercelPopupHelperModal
+            error={authError}
+            onClose={() => setIsHelperOpen(false)}
+            onRetryWithRedirect={handleLoginWithRedirect}
+          />
+        )}
+      </>
     );
   }
 
@@ -144,67 +190,61 @@ export default function App() {
 
         {/* Right: Gmail OAuth Connection & User Account */}
         <div className="flex items-center gap-3">
-          {user ? (
-            <div className="flex items-center gap-3">
-              {accessToken ? (
-                <button
-                  onClick={() => setCurrentView('gmail_settings')}
-                  title="Gmail OAuth Connected"
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium cursor-pointer hover:bg-emerald-100 transition-colors"
-                >
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  <span className="hidden sm:inline">Gmail Connected</span>
-                </button>
-              ) : (
-                <button
-                  onClick={handleQuickReauth}
-                  disabled={reauthorizing}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium hover:bg-amber-100 transition-colors cursor-pointer"
-                >
-                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                  <span>{reauthorizing ? 'Connecting...' : 'Authorize Gmail'}</span>
-                </button>
-              )}
+          <div className="flex items-center gap-3">
+            {accessToken ? (
+              <button
+                onClick={() => setCurrentView('gmail_settings')}
+                title="Gmail API Direct Connection Active"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium cursor-pointer hover:bg-emerald-100 transition-colors"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span className="hidden sm:inline">Gmail API Active</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setCurrentView('gmail_settings')}
+                title="Gmail Outreach Engine ready for sequential sending"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-800 text-xs font-medium hover:bg-indigo-100 transition-colors cursor-pointer"
+              >
+                <Send className="w-3.5 h-3.5 text-indigo-600" />
+                <span className="font-semibold hidden sm:inline">Gmail Engine Ready</span>
+                <span className="sm:hidden font-semibold">Engine Ready</span>
+              </button>
+            )}
 
-              {/* User Dropdown / Logout */}
-              <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+            {/* User Account / Active Gmail Badge */}
+            <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-xl bg-slate-100 border border-slate-200">
                 {user.photoURL ? (
                   <img
                     src={user.photoURL}
                     alt="Account"
-                    className="w-7 h-7 rounded-full border border-slate-200"
+                    className="w-6 h-6 rounded-full border border-slate-300 shrink-0"
                   />
                 ) : (
-                  <div className="w-7 h-7 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs">
+                  <div className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
                     {user.email?.charAt(0).toUpperCase() || 'U'}
                   </div>
                 )}
-                <span className="hidden lg:inline text-xs text-slate-700 font-medium truncate max-w-[120px]">
-                  {user.email?.split('@')[0]}
-                </span>
-                <button
-                  onClick={() => logout()}
-                  title="Sign out"
-                  className="text-slate-400 hover:text-red-600 transition-colors p-1 cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                </button>
+                <div className="text-left leading-tight">
+                  <span className="text-xs font-semibold text-slate-800 block truncate max-w-[180px] sm:max-w-[240px]" title={user.email || undefined}>
+                    {user.email}
+                  </span>
+                  <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                    Connected Gmail
+                  </span>
+                </div>
               </div>
+              <button
+                onClick={() => logout()}
+                title="Sign out"
+                className="text-slate-400 hover:text-red-600 transition-colors p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
-          ) : (
-            <button
-              onClick={handleLogin}
-              disabled={loginLoading}
-              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-xs rounded-xl transition-all shadow-xs cursor-pointer active:scale-98"
-            >
-              {loginLoading ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Inbox className="w-3.5 h-3.5" />
-              )}
-              <span>Connect Gmail</span>
-            </button>
-          )}
+          </div>
 
           {/* Vercel & Pop-up Setup Guide trigger */}
           <button
