@@ -27,7 +27,21 @@ import {
 export type AppViewMode = 'scout_and_send' | 'saved_leads' | 'campaigns' | 'gmail_settings';
 
 export default function App() {
-  const { user, loading, login, loginWithRedirect, loginAsGuest, logout, campaigns, accessToken, reauthorizeGmail, leads, authError, clearAuthError } = useAuth();
+  const {
+    user,
+    loading,
+    login,
+    loginWithRedirect,
+    loginWithEmail,
+    loginAsGuest,
+    logout,
+    campaigns,
+    accessToken,
+    reauthorizeGmail,
+    leads,
+    authError,
+    clearAuthError,
+  } = useAuth();
   const [currentView, setCurrentView] = useState<AppViewMode>('scout_and_send');
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [selectedLeadDetail, setSelectedLeadDetail] = useState<Lead | null>(null);
@@ -53,6 +67,17 @@ export default function App() {
       await loginWithRedirect();
     } catch (e: any) {
       console.warn('Sign-in redirect notice:', e);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLoginWithEmail = async (email: string, displayName?: string) => {
+    setLoginLoading(true);
+    try {
+      await loginWithEmail(email, displayName);
+    } catch (e: any) {
+      console.warn('Email sign-in notice:', e);
     } finally {
       setLoginLoading(false);
     }
@@ -109,10 +134,12 @@ export default function App() {
         <GoogleAuthConnectView
           onLogin={handleLogin}
           onLoginWithRedirect={handleLoginWithRedirect}
+          onLoginWithEmail={handleLoginWithEmail}
           onLoginAsGuest={handleLoginAsGuest}
           authError={authError}
           clearAuthError={clearAuthError}
           loading={loginLoading}
+          onOpenHelper={() => setIsHelperOpen(true)}
         />
         {isHelperOpen && (
           <VercelPopupHelperModal

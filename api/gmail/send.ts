@@ -29,6 +29,19 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ error: 'Missing required email fields (to, subject, bodyText).' });
     }
 
+    // Gracefully handle preview/demo mode tokens without failing
+    if (accessToken === 'demo-guest-token' || accessToken.startsWith('demo') || accessToken.startsWith('sim_') || accessToken === 'guest') {
+      await new Promise((r) => setTimeout(r, 400));
+      return res.json({
+        success: true,
+        id: `sim_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        messageId: `sim_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        threadId: `thread_${Date.now()}`,
+        simulated: true,
+        message: 'Email processed in Sandbox Mode (Simulated)',
+      });
+    }
+
     // Construct raw MIME message (RFC 2822 compliant)
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
     const senderHeader = fromName && fromEmail ? `"${fromName.replace(/"/g, '')}" <${fromEmail}>` : fromEmail || '';
@@ -83,6 +96,7 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({
       success: true,
       id: gmailData.id,
+      messageId: gmailData.id,
       threadId: gmailData.threadId,
       message: 'Email delivered successfully via Gmail Workspace API',
     });

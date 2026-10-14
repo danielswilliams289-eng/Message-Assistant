@@ -15,6 +15,10 @@
       "destination": "/api/validate-email"
     },
     {
+      "source": "/api/analyze-games",
+      "destination": "/api/analyze-games"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

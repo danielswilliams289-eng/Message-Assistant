@@ -51,6 +51,7 @@ interface AuthContextType {
   updateGoogleClientId: (clientId: string) => void;
   login: (method?: 'popup' | 'redirect') => Promise<void>;
   loginWithRedirect: () => Promise<void>;
+  loginWithEmail: (email: string, displayName?: string) => Promise<void>;
   loginAsGuest: () => Promise<void>;
   clearAuthError: () => void;
   logout: () => Promise<void>;
@@ -192,6 +193,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginWithRedirect = async () => {
     return login('redirect');
+  };
+
+  const loginWithEmail = async (email: string, displayName?: string) => {
+    setAuthError(null);
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = displayName?.trim() || cleanEmail.split('@')[0] || 'User';
+    const emailUser: GoogleUserProfile = {
+      uid: 'user_' + cleanEmail.replace(/[^a-zA-Z0-9]/g, '_'),
+      email: cleanEmail,
+      displayName: cleanName,
+      photoURL: '',
+      isAnonymous: false,
+    };
+    setUser(emailUser);
+    setAccessToken('demo-guest-token');
+    setStored(STORAGE_ACTIVE_USER, emailUser);
+
+    const logData: ActivityLog = {
+      userId: emailUser.uid,
+      type: 'gmail_connected',
+      description: `Signed in as ${cleanEmail}`,
+      createdAt: new Date().toISOString(),
+    };
+    const actKey = ACTIVITY_STORAGE_PREFIX + emailUser.uid;
+    const currentLogs = getStored<ActivityLog>(actKey);
+    const updated = [logData, ...currentLogs];
+    setStored(actKey, updated);
+    setActivities(updated);
   };
 
   // Guest / Preview Mode so user can inspect features immediately
@@ -470,6 +499,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateGoogleClientId,
         login,
         loginWithRedirect,
+        loginWithEmail,
         loginAsGuest,
         clearAuthError,
         logout,

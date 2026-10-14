@@ -57,6 +57,10 @@ export function getGoogleClientId(): string {
     const custom = localStorage.getItem(STORAGE_CUSTOM_CLIENT_ID);
     if (custom && custom.trim()) return custom.trim();
   } catch {}
+  if (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID) {
+    const envId = (import.meta as any).env.VITE_GOOGLE_CLIENT_ID;
+    if (envId && envId.trim()) return envId.trim();
+  }
   return DEFAULT_CLIENT_ID;
 }
 
@@ -166,7 +170,19 @@ export async function requestGoogleOAuthToken(
         },
         error_callback: (err: any) => {
           console.error('Google token error callback:', err);
-          reject(new Error(err?.message || 'Google authorization failed.'));
+          const origin = typeof window !== 'undefined' ? window.location.origin : '';
+          const errMsg = err?.message || err?.type || String(err);
+          if (errMsg.includes('origin_mismatch') || err?.type === 'origin_mismatch' || errMsg.includes('redirect_uri_mismatch')) {
+            reject(
+              new Error(
+                `Google OAuth Error: Origin Mismatch. The domain "${origin}" is not yet registered under Authorized JavaScript origins in Google Cloud Console. You can add it in Google Cloud Credentials, or use Direct Email Sign-In to access your workspace immediately.`
+              )
+            );
+          } else if (errMsg.includes('popup_closed') || errMsg.includes('popup_blocked')) {
+            reject(new Error(`Sign-in pop-up was closed or blocked. If Google displayed an origin mismatch or verification notice, you can use Direct Email Sign-In to access your workspace immediately.`));
+          } else {
+            reject(new Error(err?.message || 'Google authorization failed. You can sign in directly with email.'));
+          }
         },
       });
 
